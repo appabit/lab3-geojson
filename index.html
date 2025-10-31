@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lab 3: Asynchronous GeoJSON</title>
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    :root{
+      --uw-purple:#4b2e83;
+      --panel-bg:#ffffff;
+      --shadow:0 8px 24px rgba(0,0,0,.15);
+    }
+    html, body { height:100%; margin:0; font: 14px/1.4 system-ui, Arial, sans-serif; }
+    #app { position:relative; height:100%; }
+    #map { position:absolute; inset:0; }
+    /* Right-side panel hovering over map */
+    .panel {
+      position: absolute; top: 16px; right: 16px; width: 380px; max-height: calc(100% - 32px);
+      background: var(--panel-bg); border-radius: 12px; box-shadow: var(--shadow);
+      overflow: hidden; display: flex; flex-direction: column;
+    }
+    .panel .head {
+      background: var(--uw-purple); color: #fff; padding: 12px 14px;
+    }
+    .panel .body { padding: 10px 12px; overflow: auto; }
+    .muted { color:#6b7280; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      text-align: left; padding: 8px; background:#f3f4f6; position: sticky; top:0; cursor:pointer;
+    }
+    tbody td { padding: 8px; border-top: 1px solid #e5e7eb; }
+    tbody tr:hover { background:#fafafa; }
+
+    /* hide panel below 1024px to meet rubric */
+    @media (max-width: 1024px){
+      .panel { display:none; }
+    }
+
+    .legend {
+      position: absolute; bottom: 12px; left: 12px; background: #fff; padding: 8px 10px;
+      border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+    }
+    .swatch { display:inline-block; width:12px; height:12px; margin-right:6px; border-radius:2px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="map"></div>
+
+    <aside class="panel">
+      <div class="head">
+        <strong>Global Earthquakes & Japan Counties</strong>
+        <div class="muted">Sortable table (by magnitude) + async loading</div>
+      </div>
+      <div class="body">
+        <table id="eqTable">
+          <thead>
+            <tr>
+              <th data-sort="mag">Mag ⮁</th>
+              <th>Place</th>
+              <th data-sort="time">Time ⮁</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="muted">Tip: Click column headers to sort. Click a row to zoom to that earthquake.</p>
+      </div>
+    </aside>
+
+    <div class="legend">
+      <div><span class="swatch" style="background:#2DC4B2"></span> mag &lt; 3.0</div>
+      <div><span class="swatch" style="background:#3BB3C3"></span> 3.0–4.0</div>
+      <div><span class="swatch" style="background:#669EC4"></span> 4.0–5.0</div>
+      <div><span class="swatch" style="background:#8B88B6"></span> 5.0–6.0</div>
+      <div><span class="swatch" style="background:#A2719B"></span> ≥ 6.0</div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <script>
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: {
+        version: 8,
+        sources: {
+          osm: {
+            type: 'raster',
+            tiles: [
+              'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+              'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+              'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+            ],
+            tileSize: 256,
+            attribution: '© OpenStreetMap contributors'
+          }
+        },
+        layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+      },
+      center: [139.6917, 35.6895],
+      zoom: 3.8
+    });
+
+    // Async load both datasets
+    let quakeFeatures = [];
+    map.on('load', async () => {
+      const [quakes, japan] = await Promise.all([
+        fetch('assets/earthquakes.geojson').then(r => r.json()),
+        fetch('assets/japan.json').then(r => r.json())
+      ]);
+
+      // Japan polygons
+      map.addSource('japan', { type: 'geojson', data: japan });
+      map.addLayer({
+        id: 'japan-fill',
+        type: 'fill',
+        source: 'japan',
+        paint: { 'fill-color': '#6baed6', 'fill-opacity': 0.15 }
+      });
+      map.addLayer({
+        id: 'japan-outline',
+        type: 'line',
+        source: 'japan',
+        paint: { 'line-color': '#2b8cbe', 'line-width': 1 }
+      });
+
+      // Earthquakes points
+      map.addSource('quakes', { type: 'geojson', data: quakes });
+      map.addLayer({
+        id: 'quakes-circles',
+        type: 'circle',
+        source: 'quakes',
+        paint: {
+          'circle-color': [
+            'step', ['get', 'mag'],
+            '#2DC4B2', 3,
+            '#3BB3C3', 4,
+            '#669EC4', 5,
+            '#8B88B6', 6,
+            '#A2719B'
+          ],
+          'circle-radius': [
+            'interpolate', ['linear'], ['get', 'mag'],
+            2.5, 4, 5, 10, 7, 16
+          ],
+          'circle-opacity': 0.85,
+          'circle-stroke-color': '#fff',
+          'circle-stroke-width': 1
+        }
+      });
+
+      quakeFeatures = quakes.features;
+      renderTable(quakeFeatures);
+
+      map.on('click', 'quakes-circles', (e) => {
+        const f = e.features[0];
+        new maplibregl.Popup()
+          .setLngLat(e.lngLat)
+          .setHTML(`<strong>M ${f.properties.mag}</strong><br>${f.properties.place || ''}`)
+          .addTo(map);
+      });
+      map.on('mouseenter', 'quakes-circles', () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', 'quakes-circles', () => map.getCanvas().style.cursor = '');
+    });
+
+    // Build + sort table
+    const tbody = document.querySelector('#eqTable tbody');
+    function renderTable(rows){
+      tbody.innerHTML = '';
+      rows.forEach((f, i) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${Number(f.properties.mag).toFixed(1)}</td>
+          <td>${f.properties.place || ''}</td>
+          <td>${new Date(f.properties.time).toLocaleString()}</td>
+        `;
+        tr.addEventListener('click', () => {
+          const [lon, lat] = f.geometry.coordinates;
+          map.flyTo({ center: [lon, lat], zoom: 6.5, speed: 0.6 });
+        });
+        tbody.appendChild(tr);
+      });
+    }
+
+    let sortAsc = { mag: false, time: false };
+    document.querySelectorAll('th[data-sort]').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.sort;
+        sortAsc[key] = !sortAsc[key];
+        const sorted = [...quakeFeatures].sort((a, b) => {
+          const va = key === 'mag' ? Number(a.properties.mag) : Number(a.properties.time);
+          const vb = key === 'mag' ? Number(b.properties.mag) : Number(b.properties.time);
+          return sortAsc[key] ? va - vb : vb - va;
+        });
+        renderTable(sorted);
+      });
+    });
+  </script>
+</body>
+</html>
